@@ -21,6 +21,8 @@
 #include <asm/byteorder.h>
 #include <linux/types.h>
 
+#define batadv_tp_is_error(n) ((u8)n > 127 ? 1 : 0)
+
 /**
  * enum batadv_packettype - types for batman-adv encapsulated packets
  * @BATADV_IV_OGM: originator messages for B.A.T.M.A.N. IV
@@ -93,6 +95,7 @@ enum batadv_icmp_packettype {
 	BATADV_ECHO_REQUEST	       = 8,
 	BATADV_TTL_EXCEEDED	       = 11,
 	BATADV_PARAMETER_PROBLEM       = 12,
+	BATADV_TP		       = 15,
 };
 
 /**
@@ -299,6 +302,16 @@ struct batadv_icmp_user_packet {
 };
 
 /**
+ * enum batadv_icmp_user_cmd_type - TODO
+ * @BATADV_TP_START: TODO
+ * @BATADV_TP_STOP: TODO
+ */
+enum batadv_icmp_user_cmd_type {
+	BATADV_TP_START		= 0,
+	BATADV_TP_STOP		= 2,
+};
+
+/**
  * struct batadv_icmp_header - common members among all the ICMP packets
  * @packet_type: batman-adv packet type, part of the general header
  * @version: batman-adv protocol version, part of the genereal header
@@ -346,6 +359,102 @@ struct batadv_icmp_packet {
 	u8     uid;
 	u8     reserved;
 	__be16 seqno;
+};
+
+/**
+ * struct batadv_icmp_tp_packet - ICMP TP Meter packet
+ * @packet_type: batman-adv packet type, part of the general header
+ * @version: batman-adv protocol version, part of the genereal header
+ * @ttl: time to live for this packet, part of the genereal header
+ * @msg_type: ICMP packet type
+ * @dst: address of the destination node
+ * @orig: address of the source node
+ * @uid: local ICMP socket identifier
+ * @subtype: TP packet subtype
+ * @reserved: not used - useful for alignment
+ * @seqno: the TP sequence number
+ * @timestamp: time when the packet has been sent. This value is filled in a
+ *  TP_MSG and echoed back in the next TP_ACK so that the sender can compute the
+ *  RTT. Since it is read only by the host which wrote it, there is no need to
+ *  store it using network order
+ */
+struct batadv_icmp_tp_packet {
+	u8  packet_type;
+	u8  version;
+	u8  ttl;
+	u8  msg_type; /* see ICMP message types above */
+	u8  dst[ETH_ALEN];
+	u8  orig[ETH_ALEN];
+	u8  uid;
+	u8  subtype;
+	u8  reserved[2];
+	__be32   seqno;
+	__be32 timestamp;
+};
+
+/**
+ * struct batadv_icmp_tp_result_packet - returned to batctl
+ * @packet_type: TODO
+ * @version: TODO
+ * @ttl: TODO
+ * @msg_type: TODO
+ * @dst: TODO
+ * @orig: TODO
+ * @uid: TODO
+ * @reserved: TODO
+ * @return_value: TODO
+ * @test_time: TODO
+ * @total_bytes: TODO
+ */
+struct batadv_icmp_tp_result_packet {
+	u8  packet_type;
+	u8  version;
+	u8  ttl;
+	u8  msg_type; /* see ICMP message types above */
+	u8  dst[ETH_ALEN];
+	u8  orig[ETH_ALEN];
+	u8  uid;
+	u8  reserved[2];
+	u8  return_value;
+	u32 test_time;
+	u32 total_bytes;
+};
+
+/**
+ * enum batadv_icmp_tp_subtype - TODO
+ * @BATADV_TP_MSG: TODO
+ * @BATADV_TP_ACK: TODO
+ */
+enum batadv_icmp_tp_subtype {
+	BATADV_TP_MSG	= 0,
+	BATADV_TP_ACK,
+};
+
+/**
+ * enum batadv_tp_meter_status - TODO
+ * @BATADV_TP_RECEIVER: TODO
+ * @BATADV_TP_SENDER: TODO
+ * @BATADV_TP_COMPLETE: TODO
+ * @BATADV_TP_SIGINT: TODO
+ * @BATADV_TP_DST_UNREACHABLE: TODO
+ * @BATADV_TP_RESEND_LIMIT: TODO
+ * @BATADV_TP_ALREADY_ONGOING: TODO
+ * @BATADV_TP_MEMORY_ERROR: TODO
+ * @BATADV_TP_CANT_SEND: TODO
+ * @BATADV_TP_TOO_MANY: TODO
+ */
+enum batadv_tp_meter_status {
+	BATADV_TP_RECEIVER		= 1,
+	BATADV_TP_SENDER		= 2,
+	BATADV_TP_COMPLETE		= 3,
+	BATADV_TP_SIGINT		= 4,
+	/* error status >= 128 */
+	BATADV_TP_DST_UNREACHABLE	= 128,
+	BATADV_TP_RESEND_LIMIT		= 129,
+	BATADV_TP_ALREADY_ONGOING	= 130,
+	BATADV_TP_MEMORY_ERROR		= 131,
+	BATADV_TP_CANT_SEND		= 132,
+	BATADV_TP_TOO_MANY		= 133,
 };
 
 #define BATADV_RR_LEN 16
