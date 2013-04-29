@@ -348,6 +348,18 @@ struct batadv_icmp_packet {
 	__be16 seqno;
 };
 
+/**
+ * struct batadv_icmp_tp_packet - ICMP TP Meter packet
+ * @ih: common ICMP header
+ * @reserved: not used - useful for alignment
+ * @seqno: the TP sequence number
+ */
+struct batadv_icmp_tp_packet {
+	struct batadv_icmp_header ih;
+	u8 reserved;
+	__be32 seqno;
+};
+
 #define BATADV_RR_LEN 16
 
 /**
