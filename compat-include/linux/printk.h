@@ -32,6 +32,13 @@
 
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 38)
+
+#define pr_warn_once(fmt, ...) \
+	printk_once(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+
+#endif /* < KERNEL_VERSION(2, 6, 38) */
+
 #endif	/* _NET_BATMAN_ADV_COMPAT_LINUX_PRINTK_H_ */
 
 #ifndef pr_fmt
