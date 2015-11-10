@@ -448,9 +448,11 @@ struct batadv_neigh_ifinfo_bat_iv {
  * struct batadv_neigh_ifinfo_bat_v - neighbor information per outgoing
  *  interface for B.A.T.M.A.N. V
  * @throughput: last throughput metric received from originator via this neigh
+ * @last_seqno: last sequence number known for this neighbor
  */
 struct batadv_neigh_ifinfo_bat_v {
 	u32 throughput;
+	u32 last_seqno;
 };
 
 /**
