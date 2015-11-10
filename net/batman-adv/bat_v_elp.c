@@ -22,19 +22,23 @@
 #include <linux/byteorder/generic.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
+#include <linux/ethtool.h>
 #include <linux/fs.h>
 #include <linux/if_ether.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/kref.h>
 #include <linux/netdevice.h>
 #include <linux/random.h>
 #include <linux/rculist.h>
 #include <linux/rcupdate.h>
+#include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include <net/cfg80211.h>
 
 #include "bat_algo.h"
 #include "bat_v_ogm.h"
@@ -60,6 +64,168 @@ static void batadv_v_elp_start_timer(struct batadv_hard_iface *hard_iface)
 }
 
 /**
+ * batadv_v_elp_get_throughput - get the throughput towards a neighbour
+ * @neigh: the neighbour for which the throughput has to be obtained
+ *
+ * Return: the throughput towards the given neighbour.
+ */
+static u32 batadv_v_elp_get_throughput(struct batadv_hardif_neigh_node *neigh)
+{
+	struct batadv_hard_iface *hard_iface = neigh->if_incoming;
+	struct station_info sinfo;
+	struct ethtool_cmd cmd;
+	u32 throughput;
+	int ret;
+
+	/* if the user specified a customised value for this interface, then
+	 * return it directly
+	 */
+	throughput =  atomic_read(&hard_iface->bat_v.throughput_override);
+	if (throughput != 0)
+		return throughput;
+
+	/* if this is a wireless device, then ask its throughput through
+	 * cfg80211 API
+	 */
+	if (batadv_is_wifi_netdev(hard_iface->net_dev)) {
+		if (hard_iface->net_dev->ieee80211_ptr) {
+			ret = cfg80211_get_station(hard_iface->net_dev,
+						   neigh->addr, &sinfo);
+			if (ret == -ENOENT) {
+				/* Node is not associated anymore! It would be
+				 * possible to delete this neighbor. For now set
+				 * the throughput metric to 0.
+				 */
+				return 0;
+			}
+			if (!ret)
+				return sinfo.expected_throughput / 10;
+		}
+
+		/* unsupported WiFi driver version */
+		goto default_throughput;
+	}
+
+	/* if not a wifi interface, check if this device provides data via
+	 * ethtool (e.g. an Ethernet adapter)
+	 */
+	memset(&cmd, 0, sizeof(cmd));
+	rtnl_lock();
+	ret = __ethtool_get_settings(hard_iface->net_dev, &cmd);
+	rtnl_unlock();
+	if (ret == 0) {
+		/* link characteristics might change over time */
+		if (cmd.duplex == DUPLEX_FULL)
+			hard_iface->bat_v.flags |= BATADV_FULL_DUPLEX;
+		else
+			hard_iface->bat_v.flags &= ~BATADV_FULL_DUPLEX;
+
+		throughput = ethtool_cmd_speed(&cmd);
+		if (throughput && throughput != SPEED_UNKNOWN)
+			return throughput * 10;
+	}
+
+default_throughput:
+	if (!(hard_iface->bat_v.flags & BATADV_WARNING_DEFAULT)) {
+		batadv_info(hard_iface->soft_iface,
+			    "WiFi driver or ethtool info does not provide information about link speeds on interface %s, therefore defaulting to hardcoded throughput values of %d kbit/s. Consider overriding the throughput manually or checking your driver.\n",
+			    hard_iface->net_dev->name,
+			    BATADV_THROUGHPUT_DEFAULT_VALUE / 10);
+		hard_iface->bat_v.flags |= BATADV_WARNING_DEFAULT;
+	}
+
+	/* if none of the above cases apply, return the base_throughput */
+	return BATADV_THROUGHPUT_DEFAULT_VALUE;
+}
+
+/**
+ * batadv_v_elp_throughput_metric_update - worker updating the throughput metric
+ *  of a single hop neighbour
+ * @work: the work queue item
+ */
+void batadv_v_elp_throughput_metric_update(struct work_struct *work)
+{
+	struct batadv_hardif_neigh_node_bat_v *neigh_bat_v;
+	struct batadv_hardif_neigh_node *neigh;
+
+	neigh_bat_v = container_of(work, struct batadv_hardif_neigh_node_bat_v,
+				   metric_work);
+	neigh = container_of(neigh_bat_v, struct batadv_hardif_neigh_node,
+			     bat_v);
+
+	ewma_throughput_add(&neigh->bat_v.throughput,
+			    batadv_v_elp_get_throughput(neigh));
+
+	/* decrement refcounter to balance increment performed before scheduling
+	 * this task
+	 */
+	batadv_hardif_neigh_put(neigh);
+}
+
+/**
+ * batadv_v_elp_wifi_neigh_probe - send link probing packets to a neighbour
+ * @neigh: the neighbour to probe
+ *
+ * Sends a predefined number of unicast wifi packets to a given neighbour in
+ * order to trigger the throughput estimation on this link by the RC algorithm.
+ * Packets are sent only if there there is not enough payload unicast traffic
+ * towards this neighbour..
+ *
+ * Return: True on success and false in case of error during skb preparation.
+ */
+static bool
+batadv_v_elp_wifi_neigh_probe(struct batadv_hardif_neigh_node *neigh)
+{
+	struct batadv_hard_iface *hard_iface = neigh->if_incoming;
+	struct batadv_priv *bat_priv = netdev_priv(hard_iface->soft_iface);
+	unsigned long last_tx_diff;
+	struct sk_buff *skb;
+	int probe_len, i;
+	int elp_skb_len;
+
+	/* this probing routine is for Wifi neighbours only */
+	if (!batadv_is_wifi_netdev(hard_iface->net_dev))
+		return true;
+
+	/* probe the neighbor only if no unicast packets have been sent
+	 * to it in the last 100 milliseconds: this is the rate control
+	 * algorithm sampling interval (minstrel). In this way, if not
+	 * enough traffic has been sent to the neighbor, batman-adv can
+	 * generate 2 probe packets and push the RC algorithm to perform
+	 * the sampling
+	 */
+	last_tx_diff = jiffies_to_msecs(jiffies - neigh->bat_v.last_unicast_tx);
+	if (last_tx_diff <= BATADV_ELP_PROBE_MAX_TX_DIFF)
+		return true;
+
+	probe_len = max_t(int, sizeof(struct batadv_elp_packet),
+			  BATADV_ELP_MIN_PROBE_SIZE);
+
+	for (i = 0; i < BATADV_ELP_PROBES_PER_NODE; i++) {
+		elp_skb_len = hard_iface->bat_v.elp_skb->len;
+		skb = skb_copy_expand(hard_iface->bat_v.elp_skb, 0,
+				      probe_len - elp_skb_len,
+				      GFP_ATOMIC);
+		if (!skb)
+			return false;
+
+		/* Tell the skb to get as big as the allocated space (we want
+		 * the packet to be exactly of that size to make the link
+		 * throughput estimation effective.
+		 */
+		skb_put(skb, probe_len - hard_iface->bat_v.elp_skb->len);
+
+		batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
+			   "Sending unicast (probe) ELP packet on interface %s to %pM\n",
+			   hard_iface->net_dev->name, neigh->addr);
+
+		batadv_send_skb_packet(skb, hard_iface, neigh->addr);
+	}
+
+	return true;
+}
+
+/**
  * batadv_v_elp_periodic_work - ELP periodic task per interface
  * @work: work queue item
  *
@@ -67,6 +233,7 @@ static void batadv_v_elp_start_timer(struct batadv_hard_iface *hard_iface)
  */
 static void batadv_v_elp_periodic_work(struct work_struct *work)
 {
+	struct batadv_hardif_neigh_node *hardif_neigh;
 	struct batadv_hard_iface *hard_iface;
 	struct batadv_hard_iface_bat_v *bat_v;
 	struct batadv_elp_packet *elp_packet;
@@ -108,6 +275,37 @@ static void batadv_v_elp_periodic_work(struct work_struct *work)
 
 	atomic_inc(&hard_iface->bat_v.elp_seqno);
 
+	/* The throughput metric is updated on each sent packet. This way, if a
+	 * node is dead and no longer sends packets, batman-adv is still able to
+	 * react timely to its death.
+	 *
+	 * The throughput metric is updated by following these steps:
+	 * 1) if the hard_iface is wifi => send a number of unicast ELPs for
+	 *    probing/sampling to each neighbor
+	 * 2) update the throughput metric value of each neighbor (note that the
+	 *    value retrieved in this step might be 100ms old because the
+	 *    probing packets at point 1) could still be in the HW queue)
+	 */
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(hardif_neigh, &hard_iface->neigh_list, list) {
+		if (!batadv_v_elp_wifi_neigh_probe(hardif_neigh))
+			/* if something goes wrong while probing, better to stop
+			 * sending packets immediately and reschedule the task
+			 */
+			break;
+
+		if (!kref_get_unless_zero(&hardif_neigh->refcount))
+			continue;
+
+		/* Reading the estimated throughput from cfg80211 is a task that
+		 * may sleep and that is not allowed in an rcu protected
+		 * context. Therefore schedule a task for that.
+		 */
+		queue_work(batadv_event_workqueue,
+			   &hardif_neigh->bat_v.metric_work);
+	}
+	rcu_read_unlock();
+
 restart_timer:
 	batadv_v_elp_start_timer(hard_iface);
 out:
@@ -145,6 +343,15 @@ int batadv_v_elp_iface_enable(struct batadv_hard_iface *hard_iface)
 	get_random_bytes(&random_seqno, sizeof(random_seqno));
 	atomic_set(&hard_iface->bat_v.elp_seqno, random_seqno);
 	atomic_set(&hard_iface->bat_v.elp_interval, 500);
+
+	/* assume full-duplex by default */
+	hard_iface->bat_v.flags |= BATADV_FULL_DUPLEX;
+
+	/* warn the user (again) if there is no throughput data is available */
+	hard_iface->bat_v.flags &= ~BATADV_WARNING_DEFAULT;
+
+	if (batadv_is_wifi_netdev(hard_iface->net_dev))
+		hard_iface->bat_v.flags &= ~BATADV_FULL_DUPLEX;
 
 	INIT_DELAYED_WORK(&hard_iface->bat_v.elp_wq,
 			  batadv_v_elp_periodic_work);
