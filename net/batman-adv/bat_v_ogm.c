@@ -509,22 +509,10 @@ static void batadv_v_ogm_route_update(struct batadv_priv *bat_priv,
 	struct batadv_orig_node *orig_neigh_node = NULL;
 	struct batadv_orig_ifinfo *orig_ifinfo = NULL;
 	struct batadv_neigh_node *orig_neigh_router = NULL;
-	bool is_from_best_next_hop = false;
 
 	neigh_ifinfo = batadv_neigh_ifinfo_get(neigh_node, if_outgoing);
 	if (!neigh_ifinfo)
 		goto out;
-
-	/* check if sender of the OGM already is our best next hop towards the
-	 * originator of the OGM
-	 */
-	router = batadv_orig_router_get(orig_node, if_outgoing);
-	if (router) {
-		router_ifinfo = batadv_neigh_ifinfo_get(router, if_outgoing);
-		if (router_ifinfo && (router_ifinfo->bat_v.throughput != 0) &&
-		    (batadv_compare_eth(router->addr, ethhdr->h_source)))
-			is_from_best_next_hop = true;
-	}
 
 	orig_neigh_node = batadv_v_ogm_orig_get(bat_priv, ethhdr->h_source);
 	if (!orig_neigh_node)
@@ -536,6 +524,7 @@ static void batadv_v_ogm_route_update(struct batadv_priv *bat_priv,
 	/* drop packet if sender is not a direct neighbor and if we
 	 * don't route towards it
 	 */
+	router = batadv_orig_router_get(orig_node, if_outgoing);
 	if (router && router->orig_node != orig_node &&
 	    (!orig_neigh_router)) {
 		batadv_dbg(BATADV_DBG_BATMAN, bat_priv,
@@ -543,12 +532,8 @@ static void batadv_v_ogm_route_update(struct batadv_priv *bat_priv,
 		goto out;
 	}
 
-	/* no route switch if we receive an already processed OGM seqno pair
-	 * (via another neighbor) while the throughput metric isn't any better
-	 */
-	if (router_ifinfo && !is_new &&
-	    neigh_ifinfo->bat_v.throughput < router_ifinfo->bat_v.throughput)
-		goto out;
+	if (router)
+		batadv_neigh_node_put(router);
 
 	/* only unknown & newer OGMs contain TVLVs we are interested in */
 	if (if_outgoing == BATADV_IF_DEFAULT && is_new)
@@ -557,18 +542,28 @@ static void batadv_v_ogm_route_update(struct batadv_priv *bat_priv,
 					       (unsigned char *)(ogm2 + 1),
 					       ntohs(ogm2->tvlv_len));
 
+	/* Update routes, and check if the OGM is from the best next hop */
 	batadv_v_ogm_orig_update(bat_priv, orig_node, neigh_node, ogm2,
 				 if_outgoing);
 
+	/* don't forward the same seqno twice on one interface*/
+	if (orig_ifinfo->last_seqno_forwarded == ntohl(ogm2->seqno))
+		goto out;
+
+	/* acquire possibly updated router */
+	router = batadv_orig_router_get(orig_node, if_outgoing);
+
 	/* strict rule: forward packets coming from the best next hop only */
-	if (!is_from_best_next_hop)
+	if (neigh_node != router)
 		goto out;
 
 	/* only forward for specific interface, not for the default one. */
-	if (if_outgoing != BATADV_IF_DEFAULT)
+	if (if_outgoing != BATADV_IF_DEFAULT) {
+		orig_ifinfo->last_seqno_forwarded = ntohl(ogm2->seqno);
 		batadv_v_ogm_forward(bat_priv, ogm2,
 				     neigh_ifinfo->bat_v.throughput,
 				     if_incoming, if_outgoing);
+	}
 
 out:
 	if (orig_ifinfo)
