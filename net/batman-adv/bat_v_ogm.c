@@ -471,7 +471,7 @@ static int batadv_v_ogm_metric_update(struct batadv_priv *bat_priv,
 	neigh_ifinfo->bat_v.last_seqno = ntohl(ogm2->seqno);
 	neigh_ifinfo->last_ttl = ogm2->ttl;
 
-	if (seq_diff > 0)
+	if (seq_diff > 0 || protection_started)
 		ret = 1;
 	else
 		ret = 0;
