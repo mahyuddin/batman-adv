@@ -447,7 +447,7 @@ static int batadv_v_ogm_metric_update(struct batadv_priv *bat_priv,
 		goto out;
 	}
 
-	/* drop packets with old seqnos, however accept the first package after
+	/* drop packets with old seqnos, however accept the first packet after
 	 * a host has been rebooted.
 	 */
 	if ((seq_diff < 0) && !protection_started)
